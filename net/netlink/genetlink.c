@@ -317,7 +317,7 @@ static void genl_unregister_mc_groups(struct genl_family *family)
 	}
 }
 
-static int genl_validate_ops(struct genl_family *family)
+static int genl_validate_ops(const struct genl_family *family)
 {
 	const struct genl_ops *ops = family->ops;
 	unsigned int n_ops = family->n_ops;
@@ -336,10 +336,6 @@ static int genl_validate_ops(struct genl_family *family)
 			if (ops[i].cmd == ops[j].cmd)
 				return -EINVAL;
 	}
-
-	/* family is not registered yet, so no locking needed */
-	family->ops = ops;
-	family->n_ops = n_ops;
 
 	return 0;
 }
@@ -987,11 +983,67 @@ static struct genl_multicast_group genl_ctrl_groups[] = {
 	{ .name = "notify", },
 };
 
+static int genl_bind(struct net *net, int group)
+{
+	int i, err = 0;
+
+	down_read(&cb_lock);
+	for (i = 0; i < GENL_FAM_TAB_SIZE; i++) {
+		struct genl_family *f;
+
+		list_for_each_entry(f, genl_family_chain(i), family_list) {
+			if (group >= f->mcgrp_offset &&
+			    group < f->mcgrp_offset + f->n_mcgrps) {
+				int fam_grp = group - f->mcgrp_offset;
+
+				if (!f->netnsok && net != &init_net)
+					err = -ENOENT;
+				else if (f->mcast_bind)
+					err = f->mcast_bind(net, fam_grp);
+				else
+					err = 0;
+				break;
+			}
+		}
+	}
+	up_read(&cb_lock);
+
+	return err;
+}
+
+static void genl_unbind(struct net *net, int group)
+{
+	int i;
+	bool found = false;
+
+	down_read(&cb_lock);
+	for (i = 0; i < GENL_FAM_TAB_SIZE; i++) {
+		struct genl_family *f;
+
+		list_for_each_entry(f, genl_family_chain(i), family_list) {
+			if (group >= f->mcgrp_offset &&
+			    group < f->mcgrp_offset + f->n_mcgrps) {
+				int fam_grp = group - f->mcgrp_offset;
+
+				if (f->mcast_unbind)
+					f->mcast_unbind(net, fam_grp);
+				found = true;
+				break;
+			}
+		}
+	}
+	up_read(&cb_lock);
+
+	WARN_ON(!found);
+}
+
 static int __net_init genl_pernet_init(struct net *net)
 {
 	struct netlink_kernel_cfg cfg = {
 		.input		= genl_rcv,
 		.flags		= NL_CFG_F_NONROOT_RECV,
+		.bind		= genl_bind,
+		.unbind		= genl_unbind,
 	};
 
 	/* we'll bump the group number right afterwards */

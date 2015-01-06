@@ -316,7 +316,7 @@ static int vmw_dummy_query_bo_create(struct vmw_private *dev_priv)
 	if (unlikely(ret != 0))
 		return ret;
 
-	ret = ttm_bo_reserve(bo, false, true, false, 0);
+	ret = ttm_bo_reserve(bo, false, true, false, NULL);
 	BUG_ON(ret != 0);
 
 	ret = ttm_bo_kmap(bo, 0, 1, &map);
@@ -688,7 +688,11 @@ static int vmw_driver_load(struct drm_device *dev, unsigned long chipset)
 		goto out_err0;
 	}
 
-	if (unlikely(dev_priv->prim_bb_mem < dev_priv->vram_size))
+	/*
+	 * Limit back buffer size to VRAM size.  Remove this once
+	 * screen targets are implemented.
+	 */
+	if (dev_priv->prim_bb_mem > dev_priv->vram_size)
 		dev_priv->prim_bb_mem = dev_priv->vram_size;
 
 	mutex_unlock(&dev_priv->hw_mutex);
@@ -806,7 +810,7 @@ static int vmw_driver_load(struct drm_device *dev, unsigned long chipset)
 	}
 
 	if (dev_priv->capabilities & SVGA_CAP_IRQMASK) {
-		ret = drm_irq_install(dev);
+		ret = drm_irq_install(dev, dev->pdev->irq);
 		if (ret != 0) {
 			DRM_ERROR("Failed installing irq: %d\n", ret);
 			goto out_no_irq;
@@ -885,8 +889,7 @@ static int vmw_driver_unload(struct drm_device *dev)
 
 	if (dev_priv->ctx.res_ht_initialized)
 		drm_ht_remove(&dev_priv->ctx.res_ht);
-	if (dev_priv->ctx.cmd_bounce)
-		vfree(dev_priv->ctx.cmd_bounce);
+	vfree(dev_priv->ctx.cmd_bounce);
 	if (dev_priv->enable_fb) {
 		vmw_fb_close(dev_priv);
 		vmw_kms_restore_vga(dev_priv);
@@ -946,7 +949,6 @@ static void vmw_postclose(struct drm_device *dev,
 		drm_master_put(&vmw_fp->locked_master);
 	}
 
-	vmw_compat_shader_man_destroy(vmw_fp->shman);
 	ttm_object_file_release(&vmw_fp->tfile);
 	kfree(vmw_fp);
 }
@@ -966,16 +968,10 @@ static int vmw_driver_open(struct drm_device *dev, struct drm_file *file_priv)
 	if (unlikely(vmw_fp->tfile == NULL))
 		goto out_no_tfile;
 
-	vmw_fp->shman = vmw_compat_shader_man_create(dev_priv);
-	if (IS_ERR(vmw_fp->shman))
-		goto out_no_shman;
-
 	file_priv->driver_priv = vmw_fp;
 
 	return 0;
 
-out_no_shman:
-	ttm_object_file_release(&vmw_fp->tfile);
 out_no_tfile:
 	kfree(vmw_fp);
 	return ret;
@@ -1066,8 +1062,12 @@ static long vmw_generic_ioctl(struct file *filp, unsigned int cmd,
 
 	vmaster = vmw_master_check(dev, file_priv, flags);
 	if (unlikely(IS_ERR(vmaster))) {
-		DRM_INFO("IOCTL ERROR %d\n", nr);
-		return PTR_ERR(vmaster);
+		ret = PTR_ERR(vmaster);
+
+		if (ret != -ERESTARTSYS)
+			DRM_INFO("IOCTL ERROR Command %d, Error %ld.\n",
+				 nr, ret);
+		return ret;
 	}
 
 	ret = ioctl_func(filp, cmd, arg);
@@ -1417,7 +1417,7 @@ static struct drm_driver driver = {
 	.enable_vblank = vmw_enable_vblank,
 	.disable_vblank = vmw_disable_vblank,
 	.ioctls = vmw_ioctls,
-	.num_ioctls = DRM_ARRAY_SIZE(vmw_ioctls),
+	.num_ioctls = ARRAY_SIZE(vmw_ioctls),
 	.master_create = vmw_master_create,
 	.master_destroy = vmw_master_destroy,
 	.master_set = vmw_master_set,
@@ -1425,6 +1425,7 @@ static struct drm_driver driver = {
 	.open = vmw_driver_open,
 	.preclose = vmw_preclose,
 	.postclose = vmw_postclose,
+	.set_busid = drm_pci_set_busid,
 
 	.dumb_create = vmw_dumb_create,
 	.dumb_map_offset = vmw_dumb_map_offset,

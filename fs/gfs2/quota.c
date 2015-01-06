@@ -778,6 +778,7 @@ get_a_page:
 		i_size_write(inode, size);
 	inode->i_mtime = inode->i_atime = CURRENT_TIME;
 	mark_inode_dirty(inode);
+	set_bit(QDF_REFRESH, &qd->qd_flags);
 	return 0;
 
 unlock_out:
@@ -879,7 +880,7 @@ out:
 		gfs2_glock_dq_uninit(&ghs[qx]);
 	mutex_unlock(&ip->i_inode.i_mutex);
 	kfree(ghs);
-	gfs2_log_flush(ip->i_gl->gl_sbd, ip->i_gl);
+	gfs2_log_flush(ip->i_gl->gl_sbd, ip->i_gl, NORMAL_FLUSH);
 	return error;
 }
 
@@ -1359,13 +1360,8 @@ void gfs2_quota_cleanup(struct gfs2_sbd *sdp)
 
 	gfs2_assert_warn(sdp, !atomic_read(&sdp->sd_quota_count));
 
-	if (sdp->sd_quota_bitmap) {
-		if (is_vmalloc_addr(sdp->sd_quota_bitmap))
-			vfree(sdp->sd_quota_bitmap);
-		else
-			kfree(sdp->sd_quota_bitmap);
-		sdp->sd_quota_bitmap = NULL;
-	}
+	kvfree(sdp->sd_quota_bitmap);
+	sdp->sd_quota_bitmap = NULL;
 }
 
 static void quotad_error(struct gfs2_sbd *sdp, const char *msg, int error)
